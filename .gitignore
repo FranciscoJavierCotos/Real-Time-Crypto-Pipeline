@@ -8,6 +8,9 @@
 # Generated at runtime — do not commit large parquet/log files
 delta/
 
+# === Local Hadoop Runtime (Windows Spark helpers) ===
+.hadoop/
+
 # === Python ===
 __pycache__/
 *.py[cod]
@@ -26,6 +29,23 @@ pip-wheel-metadata/
 # === Jupyter ===
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
+
+# === Airflow Runtime Artifacts ===
+# Keep DAG source files and airflow/requirements.txt trackable.
+airflow/logs/
+airflow/airflow.cfg
+airflow/airflow.db
+airflow/standalone_admin_password.txt
+airflow/webserver_config.py
+airflow/*.pid
+airflow/*.sqlite
+airflow/*.sqlite3
+
+# === Kafka Runtime Artifacts ===
+# Docker named volumes are not in git, but these cover local broker runs.
+kafka-data/
+kafka-logs/
+kraft-combined-logs/
 
 # === IDE ===
 .vscode/

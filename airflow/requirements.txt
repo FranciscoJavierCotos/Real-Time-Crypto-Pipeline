@@ -1,0 +1,6 @@
+# Packages installed in the Airflow container via _PIP_ADDITIONAL_REQUIREMENTS in docker-compose.yml
+# This file is documentation only — edit both here and in docker-compose.yml to change versions.
+deltalake==0.17.4
+pandas==2.2.2
+pyarrow==15.0.2
+requests==2.31.0
