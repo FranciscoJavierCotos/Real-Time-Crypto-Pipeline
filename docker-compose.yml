@@ -60,5 +60,29 @@ services:
       kafka:
         condition: service_healthy
 
+  airflow:
+    image: apache/airflow:2.9.0
+    container_name: airflow
+    command: standalone
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      _PIP_ADDITIONAL_REQUIREMENTS: "deltalake==0.17.4 pandas==2.2.2 pyarrow==15.0.2 requests==2.31.0"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./delta:/opt/airflow/delta
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
 volumes:
   kafka-data:
