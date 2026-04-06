@@ -1,64 +1,79 @@
 """
 DAG: silver_to_databricks
-Schedule: every 10 minutes
+Schedule: every 5 minutes
 
-Tasks:
-  1. optimize_silver   — compact small files in the local Silver Delta table (best-effort)
-  2. create_table      — CREATE TABLE IF NOT EXISTS in crypto.btc (Unity Catalog)
-  3. push_to_dbfs      — read new Silver records for this 10-min window, upload to DBFS
-  4. copy_into_table   — COPY INTO the Unity Catalog table from the uploaded parquet file
+Tasks (run in parallel per table, then converge on dbt):
 
-Task order:
-  [optimize_silver, create_table] >> push_to_dbfs >> copy_into_table
-  optimize_silver never raises — it is best-effort and must not block the rest.
+  push_trades    → copy_trades    → run_dbt_silver
+  push_klines    → copy_klines    ↘
+  push_ticker    → copy_ticker    → run_dbt_gold
+  push_orderbook → copy_orderbook ↗
+
+Each push task reads new Bronze Parquet records since its own cursor (tracked in
+STATE_FILE), uploads a batch to a Unity Catalog volume, and advances the cursor.
+
+COPY INTO is idempotent: Databricks tracks loaded files and skips duplicates on retry.
 """
 
 from __future__ import annotations
 
-import base64
 import io
+import json
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 
 import pandas as pd
 import requests
 from airflow.decorators import dag, task
-from deltalake import DeltaTable
 
 
-DELTA_PATH = "/opt/airflow/delta/silver/btc_aggregates"
-DBFS_DEST_DIR = "/FileStore/silver/batches"
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+BRONZE_TRADES_DIR   = "/opt/airflow/data/bronze/btc_trades"
+BRONZE_KLINES_DIR   = "/opt/airflow/data/bronze/btc_klines"
+BRONZE_TICKER_DIR   = "/opt/airflow/data/bronze/btc_ticker"
+BRONZE_ORDERBOOK_DIR = "/opt/airflow/data/bronze/btc_orderbook"
 
-# Injected from .env via docker-compose env_file
-_raw_host = os.environ["DATABRICKS_HOST"].rstrip("/")
-DATABRICKS_HOST = _raw_host if _raw_host.startswith("http") else f"https://{_raw_host}"
-DATABRICKS_TOKEN = os.environ["DATABRICKS_TOKEN"]
+STATE_FILE = "/opt/airflow/data/.push_state.json"
+DBT_DIR    = "/opt/airflow/dbt"
+
+# ---------------------------------------------------------------------------
+# Databricks credentials (injected from .env via docker-compose env_file)
+# ---------------------------------------------------------------------------
+_raw_host               = os.environ["DATABRICKS_HOST"].rstrip("/")
+DATABRICKS_HOST         = _raw_host if _raw_host.startswith("http") else f"https://{_raw_host}"
+DATABRICKS_TOKEN        = os.environ["DATABRICKS_TOKEN"]
 DATABRICKS_WAREHOUSE_ID = os.environ["DATABRICKS_WAREHOUSE_ID"]
 
-# Unity Catalog target
-UC_CATALOG = "crypto"
-UC_SCHEMA  = "btc"
-UC_TABLE   = "silver_btc_aggregates"
-UC_FULL    = f"{UC_CATALOG}.{UC_SCHEMA}.{UC_TABLE}"
+# Unity Catalog coordinates
+UC_CATALOG   = "crypto"
+UC_SCHEMA    = "btc"
+UC_VOLUME    = "airflow_stage"
 
+# Staging base inside the UC volume
+VOLUME_BASE = f"/Volumes/{UC_CATALOG}/{UC_SCHEMA}/{UC_VOLUME}/bronze"
+
+
+# ---------------------------------------------------------------------------
+# Helpers — Databricks API
+# ---------------------------------------------------------------------------
 
 def _run_sql(statement: str) -> None:
-    """
-    Execute a SQL statement on Databricks via the Statement Execution API.
-    Polls until completion (up to ~90 s).
-    """
+    """Execute a SQL statement on Databricks via the Statement Execution API."""
     base_url = DATABRICKS_HOST + "/api/2.0/sql/statements"
     headers  = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
 
     resp = requests.post(
         base_url,
         json={
-            "statement":     statement,
-            "warehouse_id":  DATABRICKS_WAREHOUSE_ID,
-            "catalog":       UC_CATALOG,
-            "schema":        UC_SCHEMA,
-            "wait_timeout":  "30s",   # inline wait; falls back to polling if still running
+            "statement":    statement,
+            "warehouse_id": DATABRICKS_WAREHOUSE_ID,
+            "catalog":      UC_CATALOG,
+            "schema":       UC_SCHEMA,
+            "wait_timeout": "30s",
         },
         headers=headers,
         timeout=60,
@@ -72,10 +87,9 @@ def _run_sql(statement: str) -> None:
     if state in ("FAILED", "CANCELED", "CLOSED"):
         raise RuntimeError(f"SQL statement failed: {result['status'].get('error', result)}")
 
-    # Still RUNNING or PENDING — poll
     stmt_id = result["statement_id"]
-    for _ in range(30):          # 30 × 3 s = 90 s max
-        time.sleep(3)
+    for _ in range(60):
+        time.sleep(5)
         poll = requests.get(f"{base_url}/{stmt_id}", headers=headers, timeout=30)
         poll.raise_for_status()
         state = poll.json()["status"]["state"]
@@ -84,167 +98,291 @@ def _run_sql(statement: str) -> None:
         if state in ("FAILED", "CANCELED", "CLOSED"):
             raise RuntimeError(f"SQL statement failed: {poll.json()['status'].get('error', poll.json())}")
 
-    raise TimeoutError(f"SQL statement {stmt_id} did not finish within 90 s")
+    raise TimeoutError(f"SQL statement {stmt_id} did not finish within 300 s")
 
 
-def _upload_bytes_to_dbfs(data: bytes, dbfs_path: str) -> None:
-    """
-    Streaming upload to DBFS: create → add-block (loop, 900KB chunks) → close.
-    Works for any file size, unlike the single-call PUT endpoint (1MB cap).
-    overwrite=True makes retries idempotent.
-    """
-    base_url = DATABRICKS_HOST + "/api/2.0/dbfs"
-    headers  = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
-
-    resp = requests.post(
-        f"{base_url}/create",
-        json={"path": dbfs_path, "overwrite": True},
-        headers=headers,
-        timeout=30,
-    )
+def _upload_bytes_to_volume(data: bytes, volume_path: str) -> None:
+    """Upload a file to a Unity Catalog volume via the Databricks Files API."""
+    api_path = volume_path.lstrip("/")
+    url = f"{DATABRICKS_HOST}/api/2.0/fs/files/{api_path}"
+    headers = {
+        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+        "Content-Type": "application/octet-stream",
+    }
+    resp = requests.put(url, params={"overwrite": "true"}, headers=headers, data=data, timeout=120)
     resp.raise_for_status()
-    handle = resp.json()["handle"]
 
-    block_size = 900_000  # 900 KB per block, safely under the 1 MB DBFS limit
-    offset = 0
-    while offset < len(data):
-        chunk = data[offset: offset + block_size]
-        resp = requests.post(
-            f"{base_url}/add-block",
-            json={"handle": handle, "data": base64.b64encode(chunk).decode()},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        offset += block_size
 
-    requests.post(
-        f"{base_url}/close",
-        json={"handle": handle},
-        headers=headers,
-        timeout=30,
-    ).raise_for_status()
+def _ensure_stage_volume() -> None:
+    _run_sql(f"CREATE VOLUME IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}.{UC_VOLUME}")
 
+
+# ---------------------------------------------------------------------------
+# Helpers — state cursor (per-table, backward-compatible with old format)
+# ---------------------------------------------------------------------------
+
+def _read_cursor(table: str) -> pd.Timestamp:
+    """Return the last-pushed ingested_at cursor for this table."""
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        # backward-compat: old format had {"last_ingested_at": "..."} at the top level
+        if table == "btc_trades" and table not in data and "last_ingested_at" in data:
+            return pd.Timestamp(data["last_ingested_at"], tz="UTC")
+        return pd.Timestamp(data.get(table, "1970-01-01"), tz="UTC")
+    except (FileNotFoundError, KeyError, ValueError):
+        return pd.Timestamp("1970-01-01", tz="UTC")
+
+
+def _write_cursor(table: str, ts: pd.Timestamp) -> None:
+    """Advance the cursor for this table."""
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        # migrate legacy format
+        if "last_ingested_at" in data and "btc_trades" not in data:
+            data["btc_trades"] = data.pop("last_ingested_at")
+    except (FileNotFoundError, ValueError):
+        data = {}
+    data[table] = ts.isoformat()
+    with open(STATE_FILE, "w") as f:
+        json.dump(data, f)
+
+
+# ---------------------------------------------------------------------------
+# Generic push + copy helpers (called inside task functions)
+# ---------------------------------------------------------------------------
+
+def _push_bronze_table(
+    bronze_dir: str,
+    table_key: str,
+    volume_subdir: str,
+) -> str | None:
+    """
+    Read new Bronze records since last push, upload to UC Volume.
+    Returns the staged volume path, or None if nothing new.
+    """
+    import glob as glob_mod
+
+    last_pushed = _read_cursor(table_key)
+    print(f"[{table_key}] Last pushed cursor: {last_pushed}")
+
+    parquet_files = glob_mod.glob(f"{bronze_dir}/*.parquet")
+    if not parquet_files:
+        print(f"[{table_key}] Bronze directory empty — skipping.")
+        return None
+
+    df = pd.read_parquet(bronze_dir, engine="pyarrow")
+    if df.empty:
+        print(f"[{table_key}] No records — skipping.")
+        return None
+
+    df["ingested_at"] = pd.to_datetime(df["ingested_at"], utc=True)
+    batch = df[df["ingested_at"] > last_pushed].copy()
+    if batch.empty:
+        print(f"[{table_key}] No new records since {last_pushed}. Skipping.")
+        return None
+
+    new_max = batch["ingested_at"].max()
+    print(f"[{table_key}] Found {len(batch):,} new record(s) up to {new_max}.")
+
+    buf = io.BytesIO()
+    batch.to_parquet(buf, index=False, engine="pyarrow")
+
+    ts_str = new_max.strftime("%Y%m%dT%H%M%SZ")
+    staged_path = f"{VOLUME_BASE}/{volume_subdir}/{table_key}_{ts_str}.parquet"
+
+    _ensure_stage_volume()
+    print(f"[{table_key}] Uploading {len(buf.getvalue()):,} bytes → {staged_path}")
+    _upload_bytes_to_volume(buf.getvalue(), staged_path)
+
+    _write_cursor(table_key, new_max)
+    print(f"[{table_key}] Upload done — cursor advanced to {new_max}.")
+    return staged_path
+
+
+def _copy_into_landing(
+    staged_path: str | None,
+    table_name: str,
+    create_ddl: str,
+) -> str | None:
+    """COPY INTO a landing Delta table from staged Parquet. Idempotent."""
+    # Always ensure the table exists so downstream dbt models never hit
+    # TABLE_OR_VIEW_NOT_FOUND even on the first run before any data arrives.
+    _run_sql(create_ddl)
+    if staged_path is None:
+        print(f"[{table_name}] No new data — skipping COPY INTO.")
+        return None
+    full_name = f"{UC_CATALOG}.{UC_SCHEMA}.{table_name}"
+    _run_sql(f"COPY INTO {full_name} FROM '{staged_path}' FILEFORMAT = PARQUET")
+    print(f"[{table_name}] COPY INTO complete: {staged_path}")
+    return staged_path
+
+
+# ---------------------------------------------------------------------------
+# DAG
+# ---------------------------------------------------------------------------
 
 @dag(
     dag_id="silver_to_databricks",
-    schedule="*/10 * * * *",
+    schedule="*/5 * * * *",
     start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-    catchup=False,       # don't backfill historical intervals on first run
-    max_active_runs=1,   # prevent overlapping runs from racing on the Delta table
-    tags=["crypto", "silver", "databricks"],
+    catchup=False,
+    max_active_runs=1,
+    tags=["crypto", "bronze", "dbt", "databricks"],
 )
 def silver_to_databricks():
 
-    @task(task_id="optimize_silver")
-    def optimize_silver():
-        """
-        Compact small parquet files in the Silver Delta table using delta-rs.
-        The 1-second Spark trigger generates many tiny files; OPTIMIZE merges them.
-        Uses optimistic concurrency — safe to run alongside the live Spark stream.
+    # ── Trades ──────────────────────────────────────────────────────────────
 
-        Best-effort: failures are logged but never block downstream tasks.
-        """
-        try:
-            dt = DeltaTable(DELTA_PATH)
-            metrics = dt.optimize.compact()
-            print(f"Optimize complete. Metrics: {metrics}")
-        except Exception as exc:
-            print(f"Optimize failed (non-blocking): {exc}")
+    @task(task_id="push_trades")
+    def push_trades() -> str | None:
+        return _push_bronze_table(BRONZE_TRADES_DIR, "btc_trades", "trades")
 
-    @task(task_id="create_table")
-    def create_table():
-        """
-        Ensure the Unity Catalog Delta table exists.
-        Safe to run on every DAG execution — IF NOT EXISTS is idempotent.
-        """
-        _run_sql(f"""
-            CREATE TABLE IF NOT EXISTS {UC_FULL} (
-                window_start TIMESTAMP,
-                window_end   TIMESTAMP,
-                symbol       STRING,
-                avg_price    DOUBLE,
-                total_volume DOUBLE
-            )
-            USING DELTA
-        """)
-        print(f"Table {UC_FULL} is ready.")
+    @task(task_id="copy_trades")
+    def copy_trades(staged_path: str | None) -> str | None:
+        return _copy_into_landing(
+            staged_path,
+            "landing_btc_trades",
+            f"""
+            CREATE TABLE IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}.landing_btc_trades (
+                symbol      STRING,
+                price       DOUBLE,
+                volume      DOUBLE,
+                event_time  TIMESTAMP,
+                ingested_at TIMESTAMP
+            ) USING DELTA
+            """,
+        )
 
-    @task(task_id="push_to_dbfs")
-    def push_to_dbfs(data_interval_start=None, data_interval_end=None) -> str | None:
-        """
-        Read Silver records whose window_end falls within this scheduling interval,
-        then upload them as a single parquet file to Databricks DBFS.
-
-        Returns the DBFS path of the uploaded file, or None if there was nothing to push.
-        The return value is passed automatically to copy_into_table via XCom.
-        """
-        if data_interval_start is None or data_interval_end is None:
-            raise ValueError("data_interval_start and data_interval_end are required")
-
-        interval_start = pd.Timestamp(data_interval_start).tz_convert("UTC")
-        interval_end   = pd.Timestamp(data_interval_end).tz_convert("UTC")
-        print(f"Reading Silver records with window_end in ({interval_start}, {interval_end}]")
-
-        df = DeltaTable(DELTA_PATH).to_pandas()
-
-        if df.empty:
-            print("Silver table is empty — skipping upload.")
-            return None
-
-        df["window_end"] = pd.to_datetime(df["window_end"], utc=True)
-
-        batch = df[
-            (df["window_end"] > interval_start) & (df["window_end"] <= interval_end)
-        ].copy()
-
-        if batch.empty:
-            print(f"No new Silver records for {interval_start} → {interval_end}. Skipping.")
-            return None
-
-        print(f"Found {len(batch)} record(s) to upload.")
-
-        buf = io.BytesIO()
-        batch.to_parquet(buf, index=False, engine="pyarrow")
-        parquet_bytes = buf.getvalue()
-
-        ts_str    = interval_end.strftime("%Y%m%dT%H%M%SZ")
-        dbfs_path = f"{DBFS_DEST_DIR}/silver_{ts_str}.parquet"
-
-        print(f"Uploading {len(parquet_bytes):,} bytes → dbfs:{dbfs_path}")
-        _upload_bytes_to_dbfs(parquet_bytes, dbfs_path)
-        print(f"Upload complete: dbfs:{dbfs_path}")
-
-        return dbfs_path
-
-    @task(task_id="copy_into_table")
-    def copy_into_table(dbfs_path: str | None):
-        """
-        Load the uploaded parquet file into the Unity Catalog Delta table.
-        Skipped automatically if push_to_dbfs found no new records (dbfs_path is None).
-
-        COPY INTO is idempotent when the same file is retried — Databricks tracks
-        which files have already been loaded and skips them.
-        """
-        if dbfs_path is None:
-            print("No file uploaded this interval — skipping COPY INTO.")
+    @task(task_id="run_dbt_silver")
+    def run_dbt_silver(staged_path: str | None):
+        if staged_path is None:
+            print("No new trade records — skipping dbt silver.")
             return
+        result = subprocess.run(
+            ["dbt", "run", "--profiles-dir", DBT_DIR, "--project-dir", DBT_DIR, "--select", "silver"],
+            capture_output=True, text=True,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError(f"dbt silver failed (exit {result.returncode})")
 
-        _run_sql(f"""
-            COPY INTO {UC_FULL}
-            FROM 'dbfs:{dbfs_path}'
-            FILEFORMAT = PARQUET
-        """)
-        print(f"COPY INTO complete: dbfs:{dbfs_path} → {UC_FULL}")
+    # ── Klines ──────────────────────────────────────────────────────────────
 
-    opt  = optimize_silver()
-    tbl  = create_table()
-    push = push_to_dbfs()
-    copy = copy_into_table(push)
+    @task(task_id="push_klines")
+    def push_klines() -> str | None:
+        return _push_bronze_table(BRONZE_KLINES_DIR, "btc_klines", "klines")
 
-    # optimize and create_table run in parallel first;
-    # optimize never fails (errors are swallowed), so all_success on push is safe.
-    [opt, tbl] >> push >> copy
+    @task(task_id="copy_klines")
+    def copy_klines(staged_path: str | None) -> str | None:
+        return _copy_into_landing(
+            staged_path,
+            "landing_btc_klines",
+            f"""
+            CREATE TABLE IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}.landing_btc_klines (
+                symbol                 STRING,
+                open_time              TIMESTAMP,
+                close_time             TIMESTAMP,
+                open_price             DOUBLE,
+                high_price             DOUBLE,
+                low_price              DOUBLE,
+                close_price            DOUBLE,
+                volume                 DOUBLE,
+                quote_volume           DOUBLE,
+                trade_count            BIGINT,
+                taker_buy_volume       DOUBLE,
+                taker_buy_quote_volume DOUBLE,
+                ingested_at            TIMESTAMP
+            ) USING DELTA
+            """,
+        )
+
+    # ── Ticker ──────────────────────────────────────────────────────────────
+
+    @task(task_id="push_ticker")
+    def push_ticker() -> str | None:
+        return _push_bronze_table(BRONZE_TICKER_DIR, "btc_ticker", "ticker")
+
+    @task(task_id="copy_ticker")
+    def copy_ticker(staged_path: str | None) -> str | None:
+        return _copy_into_landing(
+            staged_path,
+            "landing_btc_ticker",
+            f"""
+            CREATE TABLE IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}.landing_btc_ticker (
+                symbol             STRING,
+                event_time         TIMESTAMP,
+                price_change       DOUBLE,
+                price_change_pct   DOUBLE,
+                weighted_avg_price DOUBLE,
+                open_price         DOUBLE,
+                high_price         DOUBLE,
+                low_price          DOUBLE,
+                volume_24h         DOUBLE,
+                quote_volume_24h   DOUBLE,
+                trade_count_24h    BIGINT,
+                ingested_at        TIMESTAMP
+            ) USING DELTA
+            """,
+        )
+
+    # ── Orderbook ───────────────────────────────────────────────────────────
+
+    @task(task_id="push_orderbook")
+    def push_orderbook() -> str | None:
+        return _push_bronze_table(BRONZE_ORDERBOOK_DIR, "btc_orderbook", "orderbook")
+
+    @task(task_id="copy_orderbook")
+    def copy_orderbook(staged_path: str | None) -> str | None:
+        return _copy_into_landing(
+            staged_path,
+            "landing_btc_orderbook",
+            f"""
+            CREATE TABLE IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}.landing_btc_orderbook (
+                symbol         STRING,
+                event_time     TIMESTAMP,
+                best_bid_price DOUBLE,
+                best_bid_qty   DOUBLE,
+                best_ask_price DOUBLE,
+                best_ask_qty   DOUBLE,
+                spread         DOUBLE,
+                spread_pct     DOUBLE,
+                ingested_at    TIMESTAMP
+            ) USING DELTA
+            """,
+        )
+
+    # ── Gold dbt (runs after all 3 new tables are loaded) ───────────────────
+
+    @task(task_id="run_dbt_gold")
+    def run_dbt_gold(klines_path: str | None, ticker_path: str | None, orderbook_path: str | None):
+        if all(p is None for p in (klines_path, ticker_path, orderbook_path)):
+            print("No new data in any enrichment table — skipping dbt gold.")
+            return
+        result = subprocess.run(
+            ["dbt", "run", "--profiles-dir", DBT_DIR, "--project-dir", DBT_DIR, "--select", "gold"],
+            capture_output=True, text=True,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError(f"dbt gold failed (exit {result.returncode})")
+
+    # ── Wire dependencies ────────────────────────────────────────────────────
+
+    # Trades branch (unchanged behaviour)
+    t_push  = push_trades()
+    t_copy  = copy_trades(t_push)
+    run_dbt_silver(t_copy)
+
+    # Enrichment branches (run in parallel)
+    k_copy = copy_klines(push_klines())
+    t_copy2 = copy_ticker(push_ticker())
+    o_copy = copy_orderbook(push_orderbook())
+
+    run_dbt_gold(k_copy, t_copy2, o_copy)
 
 
 silver_to_databricks()

@@ -38,7 +38,12 @@ services:
     entrypoint:
       - /bin/sh
       - -c
-      - "kafka-topics --create --if-not-exists --topic btc-trades --partitions 3 --replication-factor 1 --config retention.ms=86400000 --bootstrap-server kafka:29092 && echo 'Topic btc-trades created successfully.'"
+      - |
+        kafka-topics --create --if-not-exists --topic btc-trades    --partitions 3 --replication-factor 1 --config retention.ms=86400000 --bootstrap-server kafka:29092 &&
+        kafka-topics --create --if-not-exists --topic btc-klines    --partitions 3 --replication-factor 1 --config retention.ms=86400000 --bootstrap-server kafka:29092 &&
+        kafka-topics --create --if-not-exists --topic btc-ticker    --partitions 1 --replication-factor 1 --config retention.ms=86400000 --bootstrap-server kafka:29092 &&
+        kafka-topics --create --if-not-exists --topic btc-orderbook --partitions 3 --replication-factor 1 --config retention.ms=86400000 --bootstrap-server kafka:29092 &&
+        echo 'All topics created successfully.'
 
   producer:
     build: ./producer
@@ -47,6 +52,27 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: on-failure
+
+  processor:
+    build: ./processor
+    container_name: btc-processor
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DATA_BASE_PATH: /data
+      BRONZE_FLUSH_SEC: "10"
+      SILVER_FLUSH_SEC: "30"
+    volumes:
+      - ./data:/data
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; exit(0 if os.listdir('/data/bronze/btc_trades') else 1)\" 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -71,11 +97,12 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-      _PIP_ADDITIONAL_REQUIREMENTS: "deltalake==0.17.4 pandas==2.2.2 pyarrow==15.0.2 requests==2.31.0"
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests==2.31.0 dbt-databricks==1.8.5"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
-      - ./delta:/opt/airflow/delta
+      - ./data:/opt/airflow/data
+      - ./dbt:/opt/airflow/dbt
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s

@@ -2,11 +2,12 @@
 .env
 .env.*
 *.env
-.claude/settings.local.json
+.claude/
 
-# === Delta Lake Runtime Data ===
-# Generated at runtime — do not commit large parquet/log files
+# === Runtime Data (Bronze/Silver Parquet output) ===
+# Generated at runtime — do not commit large parquet files
 delta/
+data/
 
 # === Local Hadoop Runtime (Windows Spark helpers) ===
 .hadoop/
@@ -46,6 +47,11 @@ airflow/*.sqlite3
 kafka-data/
 kafka-logs/
 kraft-combined-logs/
+
+# === dbt Artifacts ===
+dbt/target/
+dbt/logs/
+dbt/.user.yml
 
 # === IDE ===
 .vscode/

@@ -1,0 +1,11 @@
+crypto_pipeline:
+  target: databricks
+  outputs:
+    databricks:
+      type: databricks
+      catalog: crypto
+      schema: btc
+      host: "{{ env_var('DATABRICKS_HOST') | replace('https://', '') }}"
+      http_path: "/sql/1.0/warehouses/{{ env_var('DATABRICKS_WAREHOUSE_ID') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 4

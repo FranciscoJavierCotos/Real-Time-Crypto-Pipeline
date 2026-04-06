@@ -1,0 +1,99 @@
+version: 2
+
+models:
+  - name: gold_ohlcv_enriched
+    description: >
+      Closed 1-minute OHLC candles enriched with taker buy ratio and intra-minute
+      volatility. Answers: "Is BTC trending bullish? How volatile was each minute?"
+    columns:
+      - name: window_start
+        description: "Start of the 1-minute candle window (UTC)"
+      - name: window_end
+        description: "End of the 1-minute candle window (UTC)"
+      - name: symbol
+        description: "Trading pair (e.g. BTCUSDT)"
+      - name: open_price
+        description: "Opening price of the candle"
+      - name: high_price
+        description: "Highest price reached in the candle"
+      - name: low_price
+        description: "Lowest price reached in the candle"
+      - name: close_price
+        description: "Closing price of the candle"
+      - name: volume
+        description: "Total base asset (BTC) volume traded in the candle"
+      - name: quote_volume
+        description: "Total quote asset (USD) volume traded in the candle"
+      - name: trade_count
+        description: "Number of individual trades in the candle"
+      - name: taker_buy_volume
+        description: "BTC volume from taker (market) buy orders"
+      - name: taker_buy_quote_volume
+        description: "USD volume from taker buy orders"
+      - name: candle_direction
+        description: "'bullish' if close >= open, 'bearish' otherwise"
+      - name: price_range_pct
+        description: "(high - low) / open * 100 — intra-minute volatility %"
+      - name: taker_buy_ratio
+        description: "taker_buy_volume / volume — fraction of aggressive buying; > 0.5 = more buyers"
+
+  - name: gold_liquidity_1min
+    description: >
+      1-minute aggregation of bid/ask spread snapshots. Answers: "Is the market liquid?
+      Does spread widen during volatile minutes?"
+    columns:
+      - name: window_start
+        description: "Start of the 1-minute window (UTC)"
+      - name: window_end
+        description: "End of the 1-minute window (UTC)"
+      - name: symbol
+        description: "Trading pair (e.g. BTCUSDT)"
+      - name: avg_spread
+        description: "Average bid-ask spread (USD) during the minute"
+      - name: max_spread
+        description: "Maximum bid-ask spread (USD) seen during the minute"
+      - name: min_spread
+        description: "Minimum bid-ask spread (USD) seen during the minute"
+      - name: avg_spread_pct
+        description: "Average spread as % of mid price — key liquidity indicator"
+      - name: avg_bid_qty
+        description: "Average BTC quantity available at the best bid"
+      - name: avg_ask_qty
+        description: "Average BTC quantity available at the best ask"
+      - name: bid_ask_imbalance
+        description: "(avg_bid - avg_ask) / (avg_bid + avg_ask); +1 = pure buy pressure, -1 = pure sell"
+      - name: snapshot_count
+        description: "Number of order book snapshots captured in this minute"
+
+  - name: gold_market_pulse
+    description: >
+      Master Gold table joining OHLC, liquidity, 24hr context, and trade data per minute.
+      Includes derived momentum_signal and volume_spike flag.
+      Answers: "What is the overall market state? Are volume spikes directional?"
+    columns:
+      - name: window_start
+        description: "Start of the 1-minute window (UTC)"
+      - name: window_end
+        description: "End of the 1-minute window (UTC)"
+      - name: symbol
+        description: "Trading pair (e.g. BTCUSDT)"
+      - name: candle_direction
+        description: "'bullish' or 'bearish'"
+      - name: price_range_pct
+        description: "Intra-minute price range as % of open (volatility proxy)"
+      - name: taker_buy_ratio
+        description: "Fraction of volume from aggressive buyers (> 0.5 = net buying)"
+      - name: avg_spread
+        description: "Average bid-ask spread in USD for this minute"
+      - name: avg_spread_pct
+        description: "Average spread as % of mid price"
+      - name: bid_ask_imbalance
+        description: "Order book imbalance: +1 = all bids, -1 = all asks"
+      - name: price_change_pct_24h
+        description: "Rolling 24-hour price change % at this minute's snapshot"
+      - name: volume_spike
+        description: "TRUE when this minute's trade volume exceeds 2× the 30-minute rolling average"
+      - name: momentum_signal
+        description: >
+          Derived signal combining candle direction and taker buy ratio:
+          strong_buy | moderate_buy | neutral | moderate_sell | strong_sell

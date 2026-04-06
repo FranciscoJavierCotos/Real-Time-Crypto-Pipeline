@@ -1,0 +1,100 @@
+version: 2
+
+sources:
+  - name: btc
+    database: crypto
+    schema: btc
+    tables:
+      - name: landing_btc_trades
+        description: "Raw bronze BTC trades loaded via COPY INTO from local processor"
+        columns:
+          - name: event_time
+            description: "Trade timestamp from Binance"
+          - name: price
+            description: "Trade price in USD"
+          - name: volume
+            description: "Trade volume in BTC"
+          - name: symbol
+            description: "Trading pair (e.g. BTCUSDT)"
+          - name: ingested_at
+            description: "Timestamp when the processor wrote the record locally"
+
+      - name: landing_btc_klines
+        description: "Closed 1-minute OHLC candles from Binance @kline_1m stream"
+        columns:
+          - name: symbol
+            description: "Trading pair (e.g. BTCUSDT)"
+          - name: open_time
+            description: "Candle open timestamp (UTC)"
+          - name: close_time
+            description: "Candle close timestamp (UTC)"
+          - name: open_price
+            description: "Opening price of the 1-min candle"
+          - name: high_price
+            description: "Highest price in the 1-min candle"
+          - name: low_price
+            description: "Lowest price in the 1-min candle"
+          - name: close_price
+            description: "Closing price of the 1-min candle"
+          - name: volume
+            description: "Total base asset volume traded in the candle"
+          - name: quote_volume
+            description: "Total quote asset (USD) volume traded in the candle"
+          - name: trade_count
+            description: "Number of individual trades in the candle"
+          - name: taker_buy_volume
+            description: "Base volume bought by takers (market buy orders)"
+          - name: taker_buy_quote_volume
+            description: "Quote volume bought by takers"
+          - name: ingested_at
+            description: "Timestamp when the processor wrote the record locally"
+
+      - name: landing_btc_ticker
+        description: "24-hour rolling ticker snapshots from Binance @ticker stream (sampled ~every 15s)"
+        columns:
+          - name: symbol
+            description: "Trading pair (e.g. BTCUSDT)"
+          - name: event_time
+            description: "Ticker snapshot timestamp"
+          - name: price_change
+            description: "Price change in USD over the last 24 hours"
+          - name: price_change_pct
+            description: "Price change percentage over the last 24 hours"
+          - name: weighted_avg_price
+            description: "Volume-weighted average price over the last 24 hours"
+          - name: open_price
+            description: "Opening price 24 hours ago"
+          - name: high_price
+            description: "Highest price in the last 24 hours"
+          - name: low_price
+            description: "Lowest price in the last 24 hours"
+          - name: volume_24h
+            description: "Total base asset volume in the last 24 hours"
+          - name: quote_volume_24h
+            description: "Total quote asset (USD) volume in the last 24 hours"
+          - name: trade_count_24h
+            description: "Total number of trades in the last 24 hours"
+          - name: ingested_at
+            description: "Timestamp when the processor wrote the record locally"
+
+      - name: landing_btc_orderbook
+        description: "Best bid/ask snapshots from Binance @bookTicker stream (sampled ~every 5s)"
+        columns:
+          - name: symbol
+            description: "Trading pair (e.g. BTCUSDT)"
+          - name: event_time
+            description: "Snapshot timestamp"
+          - name: best_bid_price
+            description: "Best (highest) bid price on the order book"
+          - name: best_bid_qty
+            description: "Quantity available at the best bid"
+          - name: best_ask_price
+            description: "Best (lowest) ask price on the order book"
+          - name: best_ask_qty
+            description: "Quantity available at the best ask"
+          - name: spread
+            description: "Bid-ask spread in USD (ask - bid)"
+          - name: spread_pct
+            description: "Bid-ask spread as a percentage of mid price"
+          - name: ingested_at
+            description: "Timestamp when the processor wrote the record locally"

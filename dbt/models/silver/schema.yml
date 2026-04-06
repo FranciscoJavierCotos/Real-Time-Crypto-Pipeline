@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: silver_btc_aggregates
+    description: "1-minute aggregations for BTC trades: avg price, total volume, trade count per window"
+    columns:
+      - name: window_start
+        description: "Start of the 1-minute window (truncated to minute)"
+        tests:
+          - not_null
+      - name: window_end
+        description: "End of the 1-minute window (window_start + 1 min)"
+        tests:
+          - not_null
+      - name: symbol
+        description: "Trading pair (e.g. BTCUSDT)"
+        tests:
+          - not_null
+      - name: avg_price
+        description: "Average trade price within the window"
+        tests:
+          - not_null
+      - name: total_volume
+        description: "Sum of trade volume within the window"
+      - name: trade_count
+        description: "Number of individual trades within the window"
