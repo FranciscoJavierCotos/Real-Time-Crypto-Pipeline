@@ -226,7 +226,7 @@ def _copy_into_landing(
 
 @dag(
     dag_id="silver_to_databricks",
-    schedule="*/5 * * * *",
+    schedule="*/2 * * * *",
     start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
     catchup=False,
     max_active_runs=1,
@@ -257,10 +257,10 @@ def silver_to_databricks():
         )
 
     @task(task_id="run_dbt_silver", retries=2, retry_delay=timedelta(seconds=30))
-    def run_dbt_silver(staged_path: str | None):
+    def run_dbt_silver(staged_path: str | None) -> str | None:
         if staged_path is None:
             print("No new trade records — skipping dbt silver.")
-            return
+            return None
         result = subprocess.run(
             ["dbt", "run", "--profiles-dir", DBT_DIR, "--project-dir", DBT_DIR, "--select", "silver"],
             capture_output=True, text=True,
@@ -269,6 +269,7 @@ def silver_to_databricks():
         if result.returncode != 0:
             print(result.stderr)
             raise RuntimeError(f"dbt silver failed (exit {result.returncode})")
+        return staged_path
 
     # ── Klines ──────────────────────────────────────────────────────────────
 
@@ -358,9 +359,14 @@ def silver_to_databricks():
     # ── Gold dbt (runs after all 3 new tables are loaded) ───────────────────
 
     @task(task_id="run_dbt_gold", retries=2, retry_delay=timedelta(seconds=30))
-    def run_dbt_gold(klines_path: str | None, ticker_path: str | None, orderbook_path: str | None):
-        if all(p is None for p in (klines_path, ticker_path, orderbook_path)):
-            print("No new data in any enrichment table — skipping dbt gold.")
+    def run_dbt_gold(
+        klines_path: str | None,
+        ticker_path: str | None,
+        orderbook_path: str | None,
+        silver_path: str | None,
+    ):
+        if all(p is None for p in (klines_path, ticker_path, orderbook_path, silver_path)):
+            print("No new data in any table — skipping dbt gold.")
             return
         result = subprocess.run(
             ["dbt", "run", "--profiles-dir", DBT_DIR, "--project-dir", DBT_DIR, "--select", "gold"],
@@ -373,17 +379,18 @@ def silver_to_databricks():
 
     # ── Wire dependencies ────────────────────────────────────────────────────
 
-    # Trades branch (unchanged behaviour)
+    # Trades branch: silver must finish before gold runs (gold_market_pulse joins silver_btc_aggregates)
     t_push  = push_trades()
     t_copy  = copy_trades(t_push)
-    run_dbt_silver(t_copy)
+    silver_result = run_dbt_silver(t_copy)
 
-    # Enrichment branches (run in parallel)
-    k_copy = copy_klines(push_klines())
+    # Enrichment branches (run in parallel with trades branch)
+    k_copy  = copy_klines(push_klines())
     t_copy2 = copy_ticker(push_ticker())
-    o_copy = copy_orderbook(push_orderbook())
+    o_copy  = copy_orderbook(push_orderbook())
 
-    run_dbt_gold(k_copy, t_copy2, o_copy)
+    # gold waits for silver to ensure silver_btc_aggregates is up-to-date
+    run_dbt_gold(k_copy, t_copy2, o_copy, silver_result)
 
 
 silver_to_databricks()

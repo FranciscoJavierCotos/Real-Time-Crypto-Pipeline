@@ -136,19 +136,33 @@ def _write_parquet(records: list, schema: pa.Schema, directory: Path, label: str
 # Trade consumer (Bronze raw + Silver 1-min aggregations)
 # ---------------------------------------------------------------------------
 
+def _make_consumer(topic: str, group_id: str, retries: int = 10, delay: float = 5.0) -> KafkaConsumer:
+    """Create a KafkaConsumer with retries to survive Kafka startup races."""
+    for attempt in range(1, retries + 1):
+        try:
+            return KafkaConsumer(
+                topic,
+                bootstrap_servers=KAFKA_BOOTSTRAP,
+                value_deserializer=lambda b: json.loads(b.decode("utf-8")),
+                auto_offset_reset="latest",
+                enable_auto_commit=True,
+                group_id=group_id,
+                consumer_timeout_ms=1000,
+                api_version_auto_timeout_ms=10000,
+                request_timeout_ms=15000,
+            )
+        except Exception as exc:
+            if attempt == retries:
+                raise
+            print(f"[kafka] Connection attempt {attempt}/{retries} failed ({exc}). Retrying in {delay}s...", flush=True)
+            time.sleep(delay)
+
+
 def _run_trade_consumer() -> None:
     BRONZE_TRADES_DIR.mkdir(parents=True, exist_ok=True)
     SILVER_DIR.mkdir(parents=True, exist_ok=True)
 
-    consumer = KafkaConsumer(
-        "btc-trades",
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        value_deserializer=lambda b: json.loads(b.decode("utf-8")),
-        auto_offset_reset="latest",
-        enable_auto_commit=True,
-        group_id="btc-processor",
-        consumer_timeout_ms=1000,
-    )
+    consumer = _make_consumer("btc-trades", "btc-processor")
 
     bronze_buffer: list = []
     silver_windows: dict = defaultdict(lambda: {"sum_price": 0.0, "sum_volume": 0.0, "count": 0})
@@ -242,15 +256,7 @@ def _run_bronze_consumer(
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
 
-    consumer = KafkaConsumer(
-        topic,
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        value_deserializer=lambda b: json.loads(b.decode("utf-8")),
-        auto_offset_reset="latest",
-        enable_auto_commit=True,
-        group_id=group_id,
-        consumer_timeout_ms=1000,
-    )
+    consumer = _make_consumer(topic, group_id)
 
     buffer: list = []
     last_flush = time.monotonic()
@@ -410,7 +416,11 @@ def main() -> None:
 
     try:
         while not _stop.is_set():
-            time.sleep(1)
+            time.sleep(5)
+            dead = [t.name for t in threads if not t.is_alive()]
+            if dead:
+                print(f"[watchdog] Consumer thread(s) died: {dead}. Exiting so Docker can restart.", flush=True)
+                _stop.set()
     except KeyboardInterrupt:
         _stop.set()
 

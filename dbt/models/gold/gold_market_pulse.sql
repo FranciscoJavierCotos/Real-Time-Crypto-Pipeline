@@ -51,7 +51,7 @@ ticker AS (
 
 -- Silver trade-derived aggregates (cross-validates kline volume)
 silver AS (
-    SELECT window_start, symbol, avg_price, total_volume, trade_count
+    SELECT window_start, symbol, avg_price, total_volume
     FROM {{ ref('silver_btc_aggregates') }}
 ),
 
