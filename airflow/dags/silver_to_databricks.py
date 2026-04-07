@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 from airflow.decorators import dag, task
+from datetime import timedelta
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +236,11 @@ def silver_to_databricks():
 
     # ── Trades ──────────────────────────────────────────────────────────────
 
-    @task(task_id="push_trades")
+    @task(task_id="push_trades", retries=2, retry_delay=timedelta(seconds=30))
     def push_trades() -> str | None:
         return _push_bronze_table(BRONZE_TRADES_DIR, "btc_trades", "trades")
 
-    @task(task_id="copy_trades")
+    @task(task_id="copy_trades", retries=2, retry_delay=timedelta(seconds=30))
     def copy_trades(staged_path: str | None) -> str | None:
         return _copy_into_landing(
             staged_path,
@@ -255,7 +256,7 @@ def silver_to_databricks():
             """,
         )
 
-    @task(task_id="run_dbt_silver")
+    @task(task_id="run_dbt_silver", retries=2, retry_delay=timedelta(seconds=30))
     def run_dbt_silver(staged_path: str | None):
         if staged_path is None:
             print("No new trade records — skipping dbt silver.")
@@ -271,11 +272,11 @@ def silver_to_databricks():
 
     # ── Klines ──────────────────────────────────────────────────────────────
 
-    @task(task_id="push_klines")
+    @task(task_id="push_klines", retries=2, retry_delay=timedelta(seconds=30))
     def push_klines() -> str | None:
         return _push_bronze_table(BRONZE_KLINES_DIR, "btc_klines", "klines")
 
-    @task(task_id="copy_klines")
+    @task(task_id="copy_klines", retries=2, retry_delay=timedelta(seconds=30))
     def copy_klines(staged_path: str | None) -> str | None:
         return _copy_into_landing(
             staged_path,
@@ -301,11 +302,11 @@ def silver_to_databricks():
 
     # ── Ticker ──────────────────────────────────────────────────────────────
 
-    @task(task_id="push_ticker")
+    @task(task_id="push_ticker", retries=2, retry_delay=timedelta(seconds=30))
     def push_ticker() -> str | None:
         return _push_bronze_table(BRONZE_TICKER_DIR, "btc_ticker", "ticker")
 
-    @task(task_id="copy_ticker")
+    @task(task_id="copy_ticker", retries=2, retry_delay=timedelta(seconds=30))
     def copy_ticker(staged_path: str | None) -> str | None:
         return _copy_into_landing(
             staged_path,
@@ -330,11 +331,11 @@ def silver_to_databricks():
 
     # ── Orderbook ───────────────────────────────────────────────────────────
 
-    @task(task_id="push_orderbook")
+    @task(task_id="push_orderbook", retries=2, retry_delay=timedelta(seconds=30))
     def push_orderbook() -> str | None:
         return _push_bronze_table(BRONZE_ORDERBOOK_DIR, "btc_orderbook", "orderbook")
 
-    @task(task_id="copy_orderbook")
+    @task(task_id="copy_orderbook", retries=2, retry_delay=timedelta(seconds=30))
     def copy_orderbook(staged_path: str | None) -> str | None:
         return _copy_into_landing(
             staged_path,
@@ -356,7 +357,7 @@ def silver_to_databricks():
 
     # ── Gold dbt (runs after all 3 new tables are loaded) ───────────────────
 
-    @task(task_id="run_dbt_gold")
+    @task(task_id="run_dbt_gold", retries=2, retry_delay=timedelta(seconds=30))
     def run_dbt_gold(klines_path: str | None, ticker_path: str | None, orderbook_path: str | None):
         if all(p is None for p in (klines_path, ticker_path, orderbook_path)):
             print("No new data in any enrichment table — skipping dbt gold.")
