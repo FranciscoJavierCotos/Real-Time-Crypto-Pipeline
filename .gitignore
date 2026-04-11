@@ -3,7 +3,7 @@
 .env.*
 *.env
 .claude/
-
+.claude/skills/
 # === Runtime Data (Bronze/Silver Parquet output) ===
 # Generated at runtime — do not commit large parquet files
 delta/

@@ -20,7 +20,19 @@ models:
         description: "Average trade price within the window"
         tests:
           - not_null
+          - column_positive
+          - column_between:
+              min_value: 1000
+              max_value: 500000
+              config:
+                severity: warn
       - name: total_volume
         description: "Sum of trade volume within the window"
+        tests:
+          - not_null
+          - column_positive
       - name: trade_count
         description: "Number of individual trades within the window"
+        tests:
+          - not_null
+          - column_positive

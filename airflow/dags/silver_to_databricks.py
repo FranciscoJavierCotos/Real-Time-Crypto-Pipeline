@@ -4,11 +4,12 @@ Schedule: every 5 minutes
 
 Tasks (run in parallel per table, then converge on dbt):
 
-  push_trades    → copy_trades    → run_dbt_silver
-  push_klines    → copy_klines    ↘
-  push_ticker    → copy_ticker    → run_dbt_gold
-  push_orderbook → copy_orderbook ↗
+  validate_trades    → push_trades    → copy_trades    → run_dbt_silver → test_dbt_silver
+  validate_klines    → push_klines    → copy_klines    ↘
+  validate_ticker    → push_ticker    → copy_ticker    → run_dbt_gold → test_dbt_gold
+  validate_orderbook → push_orderbook → copy_orderbook ↗
 
+Each validate task runs Great Expectations on local Parquet before upload.
 Each push task reads new Bronze Parquet records since its own cursor (tracked in
 STATE_FILE), uploads a batch to a Unity Catalog volume, and advances the cursor.
 
@@ -28,6 +29,8 @@ import pandas as pd
 import requests
 from airflow.decorators import dag, task
 from datetime import timedelta
+
+from validation_helpers import validate_bronze
 
 
 # ---------------------------------------------------------------------------
@@ -377,20 +380,150 @@ def silver_to_databricks():
             print(result.stderr)
             raise RuntimeError(f"dbt gold failed (exit {result.returncode})")
 
+    # ── Tier-2 GE validation tasks (run before each push) ────────────────────
+
+    @task(task_id="validate_trades")
+    def validate_trades_task() -> None:
+        validate_bronze(BRONZE_TRADES_DIR, [
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "symbol"}, "critical": True, "description": "trades.symbol not null"},
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "event_time"}, "critical": True, "description": "trades.event_time not null"},
+            {"expectation": "expect_table_columns_to_match_set",
+             "kwargs": {"column_set": ["symbol", "price", "volume", "event_time", "ingested_at"],
+                        "exact_match": False},
+             "critical": True, "description": "trades schema intact"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "price", "min_value": 1000, "max_value": 500000},
+             "critical": False, "description": "trades.price in [1000, 500000]"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "volume", "min_value": 0, "max_value": 10000},
+             "critical": False, "description": "trades.volume in [0, 10000]"},
+        ])
+
+    @task(task_id="validate_klines")
+    def validate_klines_task() -> None:
+        validate_bronze(BRONZE_KLINES_DIR, [
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "symbol"}, "critical": True, "description": "klines.symbol not null"},
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "open_time"}, "critical": True, "description": "klines.open_time not null"},
+            {"expectation": "expect_table_columns_to_match_set",
+             "kwargs": {"column_set": ["symbol", "open_time", "close_time", "open_price",
+                                       "high_price", "low_price", "close_price", "volume",
+                                       "quote_volume", "trade_count", "taker_buy_volume",
+                                       "taker_buy_quote_volume", "ingested_at"],
+                        "exact_match": False},
+             "critical": True, "description": "klines schema intact"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "high_price", "min_value": 1000, "max_value": 500000},
+             "critical": False, "description": "klines.high_price in plausible range"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "trade_count", "min_value": 0, "max_value": 100000},
+             "critical": False, "description": "klines.trade_count in [0, 100000]"},
+        ])
+
+    @task(task_id="validate_ticker")
+    def validate_ticker_task() -> None:
+        validate_bronze(BRONZE_TICKER_DIR, [
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "symbol"}, "critical": True, "description": "ticker.symbol not null"},
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "event_time"}, "critical": True, "description": "ticker.event_time not null"},
+            {"expectation": "expect_table_columns_to_match_set",
+             "kwargs": {"column_set": ["symbol", "event_time", "price_change", "price_change_pct",
+                                       "weighted_avg_price", "open_price", "high_price", "low_price",
+                                       "volume_24h", "quote_volume_24h", "trade_count_24h", "ingested_at"],
+                        "exact_match": False},
+             "critical": True, "description": "ticker schema intact"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "price_change_pct", "min_value": -50, "max_value": 50},
+             "critical": False, "description": "ticker.price_change_pct in [-50%, +50%]"},
+        ])
+
+    @task(task_id="validate_orderbook")
+    def validate_orderbook_task() -> None:
+        validate_bronze(BRONZE_ORDERBOOK_DIR, [
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "symbol"}, "critical": True, "description": "orderbook.symbol not null"},
+            {"expectation": "expect_column_values_to_not_be_null",
+             "kwargs": {"column": "event_time"}, "critical": True, "description": "orderbook.event_time not null"},
+            {"expectation": "expect_table_columns_to_match_set",
+             "kwargs": {"column_set": ["symbol", "event_time", "best_bid_price", "best_bid_qty",
+                                       "best_ask_price", "best_ask_qty", "spread", "spread_pct",
+                                       "ingested_at"],
+                        "exact_match": False},
+             "critical": True, "description": "orderbook schema intact"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "spread", "min_value": 0, "max_value": 500},
+             "critical": False, "description": "orderbook.spread in [0, 500]"},
+            {"expectation": "expect_column_values_to_be_between",
+             "kwargs": {"column": "spread_pct", "min_value": 0, "max_value": 5},
+             "critical": False, "description": "orderbook.spread_pct in [0%, 5%]"},
+        ])
+
+    # ── Tier-3 dbt test tasks (run after each dbt run) ────────────────────────
+
+    @task(task_id="test_dbt_silver", retries=1, retry_delay=timedelta(seconds=30))
+    def test_dbt_silver(staged_path: str | None) -> str | None:
+        if staged_path is None:
+            print("No silver run — skipping dbt test silver.")
+            return None
+        result = subprocess.run(
+            ["dbt", "test", "--profiles-dir", DBT_DIR, "--project-dir", DBT_DIR,
+             "--select", "silver"],
+            capture_output=True, text=True,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError(f"dbt test silver failed (exit {result.returncode})")
+        return staged_path
+
+    @task(task_id="test_dbt_gold", retries=1, retry_delay=timedelta(seconds=30))
+    def test_dbt_gold(gold_result) -> None:
+        if gold_result is None:
+            print("No gold run — skipping dbt test gold.")
+            return
+        result = subprocess.run(
+            ["dbt", "test", "--profiles-dir", DBT_DIR, "--project-dir", DBT_DIR,
+             "--select", "gold"],
+            capture_output=True, text=True,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError(f"dbt test gold failed (exit {result.returncode})")
+
     # ── Wire dependencies ────────────────────────────────────────────────────
 
-    # Trades branch: silver must finish before gold runs (gold_market_pulse joins silver_btc_aggregates)
-    t_push  = push_trades()
-    t_copy  = copy_trades(t_push)
+    # Trades: validate → push → copy → dbt silver → dbt test silver
+    v_trades      = validate_trades_task()
+    t_push        = push_trades()
+    v_trades      >> t_push
+    t_copy        = copy_trades(t_push)
     silver_result = run_dbt_silver(t_copy)
+    test_silver   = test_dbt_silver(silver_result)
 
-    # Enrichment branches (run in parallel with trades branch)
-    k_copy  = copy_klines(push_klines())
-    t_copy2 = copy_ticker(push_ticker())
-    o_copy  = copy_orderbook(push_orderbook())
+    # Enrichment branches: each validates before pushing (run in parallel)
+    v_klines = validate_klines_task()
+    k_push   = push_klines()
+    v_klines >> k_push
+    k_copy   = copy_klines(k_push)
 
-    # gold waits for silver to ensure silver_btc_aggregates is up-to-date
-    run_dbt_gold(k_copy, t_copy2, o_copy, silver_result)
+    v_ticker = validate_ticker_task()
+    t_push2  = push_ticker()
+    v_ticker >> t_push2
+    t_copy2  = copy_ticker(t_push2)
+
+    v_orderbook = validate_orderbook_task()
+    o_push      = push_orderbook()
+    v_orderbook >> o_push
+    o_copy      = copy_orderbook(o_push)
+
+    # Gold waits for silver tests + all enrichment tables loaded
+    gold_result = run_dbt_gold(k_copy, t_copy2, o_copy, test_silver)
+    test_dbt_gold(gold_result)
 
 
 silver_to_databricks()

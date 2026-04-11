@@ -97,7 +97,7 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests==2.31.0 dbt-databricks==1.8.5"
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests==2.31.0 dbt-databricks==1.8.5 great_expectations==0.18.19"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs

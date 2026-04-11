@@ -7,29 +7,55 @@ sources:
     tables:
       - name: landing_btc_trades
         description: "Raw bronze BTC trades loaded via COPY INTO from local processor"
+        loaded_at_field: ingested_at
+        freshness:
+          warn_after:  {count: 10, period: minute}
+          error_after: {count: 30, period: minute}
         columns:
           - name: event_time
             description: "Trade timestamp from Binance"
+            tests:
+              - not_null
           - name: price
             description: "Trade price in USD"
+            tests:
+              - not_null
           - name: volume
             description: "Trade volume in BTC"
+            tests:
+              - not_null
           - name: symbol
             description: "Trading pair (e.g. BTCUSDT)"
+            tests:
+              - not_null
           - name: ingested_at
             description: "Timestamp when the processor wrote the record locally"
+            tests:
+              - not_null
 
       - name: landing_btc_klines
         description: "Closed 1-minute OHLC candles from Binance @kline_1m stream"
+        loaded_at_field: ingested_at
+        freshness:
+          warn_after:  {count: 10, period: minute}
+          error_after: {count: 30, period: minute}
         columns:
           - name: symbol
             description: "Trading pair (e.g. BTCUSDT)"
+            tests:
+              - not_null
           - name: open_time
             description: "Candle open timestamp (UTC)"
+            tests:
+              - not_null
           - name: close_time
             description: "Candle close timestamp (UTC)"
+            tests:
+              - not_null
           - name: open_price
             description: "Opening price of the 1-min candle"
+            tests:
+              - not_null
           - name: high_price
             description: "Highest price in the 1-min candle"
           - name: low_price
@@ -48,20 +74,32 @@ sources:
             description: "Quote volume bought by takers"
           - name: ingested_at
             description: "Timestamp when the processor wrote the record locally"
+            tests:
+              - not_null
 
       - name: landing_btc_ticker
         description: "24-hour rolling ticker snapshots from Binance @ticker stream (sampled ~every 15s)"
+        loaded_at_field: ingested_at
+        freshness:
+          warn_after:  {count: 10, period: minute}
+          error_after: {count: 30, period: minute}
         columns:
           - name: symbol
             description: "Trading pair (e.g. BTCUSDT)"
+            tests:
+              - not_null
           - name: event_time
             description: "Ticker snapshot timestamp"
+            tests:
+              - not_null
           - name: price_change
             description: "Price change in USD over the last 24 hours"
           - name: price_change_pct
             description: "Price change percentage over the last 24 hours"
           - name: weighted_avg_price
             description: "Volume-weighted average price over the last 24 hours"
+            tests:
+              - not_null
           - name: open_price
             description: "Opening price 24 hours ago"
           - name: high_price
@@ -76,16 +114,28 @@ sources:
             description: "Total number of trades in the last 24 hours"
           - name: ingested_at
             description: "Timestamp when the processor wrote the record locally"
+            tests:
+              - not_null
 
       - name: landing_btc_orderbook
         description: "Best bid/ask snapshots from Binance @bookTicker stream (sampled ~every 5s)"
+        loaded_at_field: ingested_at
+        freshness:
+          warn_after:  {count: 10, period: minute}
+          error_after: {count: 30, period: minute}
         columns:
           - name: symbol
             description: "Trading pair (e.g. BTCUSDT)"
+            tests:
+              - not_null
           - name: event_time
             description: "Snapshot timestamp"
+            tests:
+              - not_null
           - name: best_bid_price
             description: "Best (highest) bid price on the order book"
+            tests:
+              - not_null
           - name: best_bid_qty
             description: "Quantity available at the best bid"
           - name: best_ask_price
@@ -94,7 +144,11 @@ sources:
             description: "Quantity available at the best ask"
           - name: spread
             description: "Bid-ask spread in USD (ask - bid)"
+            tests:
+              - not_null
           - name: spread_pct
             description: "Bid-ask spread as a percentage of mid price"
           - name: ingested_at
             description: "Timestamp when the processor wrote the record locally"
+            tests:
+              - not_null

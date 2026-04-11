@@ -14,3 +14,9 @@ models:
       +materialized: incremental
     gold:
       +materialized: incremental
+
+tests:
+  crypto_pipeline:
+    +severity: error
+    +store_failures: true
+    +schema: dbt_test_failures

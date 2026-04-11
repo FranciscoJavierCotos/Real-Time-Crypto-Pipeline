@@ -109,6 +109,33 @@ ORDERBOOK_SCHEMA = pa.schema([
 ])
 
 # ---------------------------------------------------------------------------
+# Tier-1 validation rules
+# ---------------------------------------------------------------------------
+# _REQUIRED_FIELDS: fields that must be present and non-null in every record.
+# _RANGE_RULES: (field, operator, threshold) numeric constraints per label.
+_REQUIRED_FIELDS: dict = {
+    "bronze/trades":    ["symbol", "price", "volume", "event_time", "ingested_at"],
+    "silver":           ["window_start", "window_end", "symbol", "avg_price", "total_volume"],
+    "bronze/klines":    ["symbol", "open_time", "close_time", "open_price",
+                         "high_price", "low_price", "close_price", "volume", "ingested_at"],
+    "bronze/ticker":    ["symbol", "event_time", "weighted_avg_price",
+                         "open_price", "high_price", "low_price", "volume_24h", "ingested_at"],
+    "bronze/orderbook": ["symbol", "event_time", "best_bid_price",
+                         "best_ask_price", "spread", "ingested_at"],
+}
+
+_RANGE_RULES: dict = {
+    "bronze/trades":    [("price", ">", 0), ("volume", ">", 0)],
+    "silver":           [("avg_price", ">", 0), ("total_volume", ">", 0)],
+    "bronze/klines":    [("open_price", ">", 0), ("high_price", ">", 0),
+                         ("low_price", ">", 0), ("close_price", ">", 0), ("volume", ">", 0)],
+    "bronze/ticker":    [("weighted_avg_price", ">", 0), ("open_price", ">", 0),
+                         ("high_price", ">", 0), ("low_price", ">", 0), ("volume_24h", ">", 0)],
+    "bronze/orderbook": [("best_bid_price", ">", 0), ("best_ask_price", ">", 0),
+                         ("spread", ">=", 0)],
+}
+
+# ---------------------------------------------------------------------------
 # Shared shutdown event
 # ---------------------------------------------------------------------------
 _stop = threading.Event()
@@ -122,14 +149,71 @@ def _floor_minute(ts: pd.Timestamp) -> pd.Timestamp:
     return ts.replace(second=0, microsecond=0, nanosecond=0)
 
 
+def _validate_batch(records: list, label: str) -> tuple:
+    """
+    Tier-1 data quality gate — pure Python, zero external dependencies.
+
+    Checks each record against _REQUIRED_FIELDS (null/missing) and _RANGE_RULES
+    (numeric constraints).  Returns (valid_records, dropped_count).  Each dropped
+    record is logged to stdout so container logs capture the reason.
+    """
+    required = _REQUIRED_FIELDS.get(label, [])
+    ranges   = _RANGE_RULES.get(label, [])
+    valid: list = []
+    dropped: int = 0
+
+    for rec in records:
+        failed = False
+
+        for field in required:
+            val = rec.get(field)
+            if val is None or val == "":
+                print(f"[{label}][validation] DROP — '{field}' null/missing", flush=True)
+                failed = True
+                break
+        if failed:
+            dropped += 1
+            continue
+
+        for field, op, threshold in ranges:
+            val = rec.get(field)
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                print(f"[{label}][validation] DROP — '{field}' not numeric: {val!r}", flush=True)
+                failed = True
+                break
+            if op == ">" and not fval > threshold:
+                print(f"[{label}][validation] DROP — '{field}'={fval} violates >{threshold}", flush=True)
+                failed = True
+                break
+            if op == ">=" and not fval >= threshold:
+                print(f"[{label}][validation] DROP — '{field}'={fval} violates >={threshold}", flush=True)
+                failed = True
+                break
+
+        if failed:
+            dropped += 1
+        else:
+            valid.append(rec)
+
+    return valid, dropped
+
+
 def _write_parquet(records: list, schema: pa.Schema, directory: Path, label: str) -> None:
     if not records:
         return
+    valid_records, dropped = _validate_batch(records, label)
+    if dropped:
+        print(f"[{label}][validation] Dropped {dropped}/{len(records)} records this flush.", flush=True)
+    if not valid_records:
+        print(f"[{label}] All records dropped by validation — skipping write.", flush=True)
+        return
     ts_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     path = directory / f"{ts_str}_{uuid.uuid4().hex[:8]}.parquet"
-    table = pa.Table.from_pylist(records, schema=schema)
+    table = pa.Table.from_pylist(valid_records, schema=schema)
     pq.write_table(table, str(path), compression="snappy")
-    print(f"[{label}] Wrote {len(records)} rows → {path.name}", flush=True)
+    print(f"[{label}] Wrote {len(valid_records)} rows → {path.name}", flush=True)
 
 
 # ---------------------------------------------------------------------------

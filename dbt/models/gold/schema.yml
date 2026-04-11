@@ -8,20 +8,41 @@ models:
     columns:
       - name: window_start
         description: "Start of the 1-minute candle window (UTC)"
+        tests:
+          - not_null
       - name: window_end
         description: "End of the 1-minute candle window (UTC)"
+        tests:
+          - not_null
       - name: symbol
         description: "Trading pair (e.g. BTCUSDT)"
+        tests:
+          - not_null
       - name: open_price
         description: "Opening price of the candle"
+        tests:
+          - not_null
+          - column_positive
       - name: high_price
         description: "Highest price reached in the candle"
+        tests:
+          - not_null
+          - column_positive
       - name: low_price
         description: "Lowest price reached in the candle"
+        tests:
+          - not_null
+          - column_positive
       - name: close_price
         description: "Closing price of the candle"
+        tests:
+          - not_null
+          - column_positive
       - name: volume
         description: "Total base asset (BTC) volume traded in the candle"
+        tests:
+          - not_null
+          - column_positive
       - name: quote_volume
         description: "Total quote asset (USD) volume traded in the candle"
       - name: trade_count
@@ -32,10 +53,25 @@ models:
         description: "USD volume from taker buy orders"
       - name: candle_direction
         description: "'bullish' if close >= open, 'bearish' otherwise"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["bullish", "bearish"]
       - name: price_range_pct
         description: "(high - low) / open * 100 — intra-minute volatility %"
+        tests:
+          - column_between:
+              min_value: 0
+              max_value: 100
+              config:
+                severity: warn
       - name: taker_buy_ratio
         description: "taker_buy_volume / volume — fraction of aggressive buying; > 0.5 = more buyers"
+        tests:
+          - not_null
+          - column_between:
+              min_value: 0
+              max_value: 1
 
   - name: gold_liquidity_1min
     description: >
@@ -44,26 +80,53 @@ models:
     columns:
       - name: window_start
         description: "Start of the 1-minute window (UTC)"
+        tests:
+          - not_null
       - name: window_end
         description: "End of the 1-minute window (UTC)"
+        tests:
+          - not_null
       - name: symbol
         description: "Trading pair (e.g. BTCUSDT)"
+        tests:
+          - not_null
       - name: avg_spread
         description: "Average bid-ask spread (USD) during the minute"
+        tests:
+          - not_null
+          - column_between:
+              min_value: 0
+              max_value: 500
+              config:
+                severity: warn
       - name: max_spread
         description: "Maximum bid-ask spread (USD) seen during the minute"
       - name: min_spread
         description: "Minimum bid-ask spread (USD) seen during the minute"
       - name: avg_spread_pct
         description: "Average spread as % of mid price — key liquidity indicator"
+        tests:
+          - column_between:
+              min_value: 0
+              max_value: 5
+              config:
+                severity: warn
       - name: avg_bid_qty
         description: "Average BTC quantity available at the best bid"
       - name: avg_ask_qty
         description: "Average BTC quantity available at the best ask"
       - name: bid_ask_imbalance
         description: "(avg_bid - avg_ask) / (avg_bid + avg_ask); +1 = pure buy pressure, -1 = pure sell"
+        tests:
+          - not_null
+          - column_between:
+              min_value: -1
+              max_value: 1
       - name: snapshot_count
         description: "Number of order book snapshots captured in this minute"
+        tests:
+          - not_null
+          - column_positive
 
   - name: gold_market_pulse
     description: >
@@ -73,22 +136,46 @@ models:
     columns:
       - name: window_start
         description: "Start of the 1-minute window (UTC)"
+        tests:
+          - not_null
       - name: window_end
         description: "End of the 1-minute window (UTC)"
+        tests:
+          - not_null
       - name: symbol
         description: "Trading pair (e.g. BTCUSDT)"
+        tests:
+          - not_null
       - name: candle_direction
         description: "'bullish' or 'bearish'"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["bullish", "bearish"]
       - name: price_range_pct
         description: "Intra-minute price range as % of open (volatility proxy)"
       - name: taker_buy_ratio
         description: "Fraction of volume from aggressive buyers (> 0.5 = net buying)"
+        tests:
+          - column_between:
+              min_value: 0
+              max_value: 1
       - name: avg_spread
         description: "Average bid-ask spread in USD for this minute"
+        tests:
+          - column_between:
+              min_value: 0
+              max_value: 500
+              config:
+                severity: warn
       - name: avg_spread_pct
         description: "Average spread as % of mid price"
       - name: bid_ask_imbalance
         description: "Order book imbalance: +1 = all bids, -1 = all asks"
+        tests:
+          - column_between:
+              min_value: -1
+              max_value: 1
       - name: price_change_pct_24h
         description: "Rolling 24-hour price change % at this minute's snapshot"
       - name: volume_spike
@@ -97,3 +184,7 @@ models:
         description: >
           Derived signal combining candle direction and taker buy ratio:
           strong_buy | moderate_buy | neutral | moderate_sell | strong_sell
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["strong_buy", "moderate_buy", "neutral", "moderate_sell", "strong_sell"]
