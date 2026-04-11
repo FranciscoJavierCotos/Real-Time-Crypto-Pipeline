@@ -29,48 +29,6 @@ It does this by fusing four independent market signals, applying a three-tier da
   <img src="/docs/crypto_pipeline_architecture.svg" width="800" />
 </p>
 
-<!-- SCREENSHOT PLACEHOLDER: Airflow DAG graph view showing the validate → push → copy → dbt dependency chain -->
-<!-- Path: docs/screenshots/airflow_dag_graph.png -->
-
-```
-Binance WebSocket (4 combined streams)
-  │
-  │  One connection  ──  four sub-streams, sampled to control volume
-  │
-  ▼
-Python Producer  (Docker)
-  │  · Deserialises each stream type with a dedicated handler
-  │  · Publishes only closed kline candles  (k["x"] == True)
-  │
-  ▼
-Apache Kafka  (KRaft — no ZooKeeper)
-  ├── btc-trades     (3 partitions)   — every individual trade
-  ├── btc-klines     (3 partitions)   — closed 1-min OHLC candles
-  ├── btc-ticker     (1 partition)    — 24-hour rolling statistics
-  └── btc-orderbook  (3 partitions)   — best bid/ask snapshots
-  │
-  ▼
-Python Processor  (Docker, 4 daemon threads)
-  ├── Bronze — raw records flushed to Parquet every 10 s
-  └── Silver — 1-min windowed trade aggregations, flushed every 30 s
-               (late-arrival tolerance: 60 s past window end)
-  │
-  │  ./data/  (Docker volume, shared with Airflow)
-  │
-  ▼
-Apache Airflow DAG  (every 2 minutes, max_active_runs=1)
-  │
-  ├── Tier-2: Great Expectations validation on Bronze before upload
-  │     · Critical failures  →  blocks upload (data never reaches cloud)
-  │     · Soft warnings      →  logs alert, pipeline continues
-  │
-  ├── push_*     — incremental upload to Databricks Unity Catalog Volume
-  ├── copy_*     — idempotent COPY INTO landing Delta tables
-  │
-  ├── run_dbt_silver  →  test_dbt_silver
-  └── run_dbt_gold    →  test_dbt_gold   (Tier-3: dbt tests after every run)
-```
-
 **Full task dependency graph**
 
 ```
@@ -107,6 +65,10 @@ Four directories of time-stamped Parquet files, one per stream. Each record carr
 
 ### Gold — Analyst-ready, business-question-driven tables
 
+<p align="center">
+  <img src="/docs/databricks-gold.png" width="1000" />
+</p>
+
 | Gold table | Business question answered |
 |---|---|
 | `gold_ohlcv_enriched` | Is BTC trending bullish or bearish this minute? How volatile? Are buyers or sellers aggressive? |
@@ -128,13 +90,6 @@ END
 ```
 
 `volume_spike` flags any minute where trade volume exceeds 2× the 30-minute rolling average — the earliest quantitative signal that something significant is happening.
-
-<!-- SCREENSHOT PLACEHOLDER: Databricks Unity Catalog showing gold_market_pulse table with recent rows -->
-<!-- Path: docs/screenshots/databricks_gold_market_pulse.png -->
-
-<p align="center">
-  <img src="/docs/databricks-gold.png" width="1000" />
-</p>
 
 ---
 
