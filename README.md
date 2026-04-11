@@ -29,8 +29,6 @@ It does this by fusing four independent market signals, applying a three-tier da
   <img src="/docs/crypto_pipeline_architecture.svg" width="800" />
 </p>
 
-
-
 <!-- SCREENSHOT PLACEHOLDER: Airflow DAG graph view showing the validate → push → copy → dbt dependency chain -->
 <!-- Path: docs/screenshots/airflow_dag_graph.png -->
 
@@ -90,11 +88,18 @@ Trades trigger the Silver model independently. The three enrichment branches run
 
 > **Diagram 2 — Bronze → Silver → Gold data flow**
 
-![Medallion architecture: Bronze raw Parquet → Silver windowed aggregations → Gold analyst-ready tables](/docs/medallion_architecture.svg)
+<p align="center">
+  <img src="/docs/medallion_architecture.svg" width="800" />
+</p>
+
 
 ### Bronze — Raw landing zone
 
 Four directories of time-stamped Parquet files, one per stream. Each record carries an `ingested_at` timestamp — the cursor Airflow uses to detect new data without file-name parsing or Kafka offset management. PyArrow enforces the schema at write time; malformed records never reach disk.
+
+<p align="center">
+  <img src="/docs/kafka-btc-trades-topic.png" width="1000" />
+</p>
 
 ### Silver — Cleaned aggregations
 
@@ -127,13 +132,21 @@ END
 <!-- SCREENSHOT PLACEHOLDER: Databricks Unity Catalog showing gold_market_pulse table with recent rows -->
 <!-- Path: docs/screenshots/databricks_gold_market_pulse.png -->
 
+<p align="center">
+  <img src="/docs/databricks-gold.png" width="1000" />
+</p>
+
 ---
 
 ## Data Quality: Three Tiers of Trust
 
 > **Diagram 3 — Three-tier quality framework**
 
-![Data quality framework: Tier 1 schema enforcement, Tier 2 Great Expectations validation, Tier 3 dbt tests](/docs/data_quality_tiers.svg)
+
+<p align="center">
+  <img src="/docs/data_quality_three_tiers.svg" width="800" />
+</p>
+
 
 Data quality is not a checkbox — it determines whether downstream consumers can trust the output. This pipeline enforces quality at three independent layers:
 
@@ -193,6 +206,10 @@ Test failures are persisted to the `dbt_test_failures` Unity Catalog schema so a
 ---
 
 ## Running It Locally
+
+<p align="center">
+  <img src="/docs/docker.png" width="1200" />
+</p>
 
 **Prerequisites:** Docker Desktop, a Databricks workspace with a SQL warehouse, and a `.env` file:
 
