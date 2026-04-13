@@ -1,4 +1,4 @@
-# Real-Time Crypto Market Intelligence Pipeline
+# Near Real-Time Crypto Market Analytics Pipeline
 
 A production-style data engineering project that fuses four live Binance WebSocket streams into a single, trustworthy, analyst-ready view of the Bitcoin market — updated every two minutes, validated at every stage, and fully orchestrated in the cloud.
 
